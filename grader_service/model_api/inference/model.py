@@ -1,17 +1,25 @@
 from transformers import pipeline
 import mlflow.transformers
 import os
+import logging
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 def load_model():
     try:
-        MLFLOW_RUN_ID = "45020b161c4a4494ba22e1b7dc60fcc8"
-        model_uri = f"runs:/{MLFLOW_RUN_ID}/code_grader_model"
+        # Load the latest production model from MLflow
+        model_uri = "models:/CodeGraderModel/Production"
         model = mlflow.transformers.load_model(model_uri)
-        print("✅ Loaded model from MLflow")
+        logger.info("Loaded model from MLflow")
     except Exception as e:
-        print(f"⚠️ Failed to load from MLflow: {e}")
+        logger.error(f"Failed to load from MLflow: {e}")
+        # Fallback to a default model
         model = pipeline("text-classification", model="distilbert-base-uncased")
+        logger.warning("Loaded default distilbert-base-uncased model")
     return model
 
 
