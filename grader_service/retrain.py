@@ -12,8 +12,10 @@ from datasets import Dataset
 import logging
 import torch
 import pandas as pd
-from mlflow.models.signature import infer_signature
+from datetime import datetime
+import uuid
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -22,6 +24,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def load_data():
+    """Load graded samples from SQLite database."""
     try:
         conn = sqlite3.connect("grading_data.db")
         cursor = conn.cursor()
@@ -36,6 +39,7 @@ def load_data():
 
 
 def preprocess(rows):
+    """Preprocess data by combining code and criteria, extracting labels."""
     if not rows:
         raise ValueError("No data to preprocess")
     inputs = [
@@ -46,13 +50,19 @@ def preprocess(rows):
 
 
 def retrain_model():
+    """Retrain the code grading model and log to MLflow."""
     logger.info("Starting model retraining")
+
+    # Load and validate data
     data = load_data()
     if len(data) < 10:
         logger.warning("Insufficient data for retraining. Need at least 10 samples.")
         return
 
+    # Preprocess data
     inputs, labels = preprocess(data)
+
+    # Initialize model and tokenizer
     model_name = "distilbert-base-uncased"
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
@@ -63,6 +73,7 @@ def retrain_model():
         logger.error(f"Failed to load model/tokenizer: {e}")
         raise
 
+    # Tokenize inputs
     encodings = tokenizer(inputs, truncation=True, padding=True, return_tensors="pt")
     dataset = Dataset.from_dict(
         {
@@ -72,6 +83,7 @@ def retrain_model():
         }
     )
 
+    # Define training arguments
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=3,
@@ -84,55 +96,72 @@ def retrain_model():
         fp16=torch.cuda.is_available(),
     )
 
+    # Move model to appropriate device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
+
+    # Initialize trainer
     trainer = Trainer(model=model, args=training_args, train_dataset=dataset)
 
     try:
+        # Configure MLflow
         mlflow.set_tracking_uri("http://localhost:5000")
+        mlflow.set_registry_uri("http://localhost:5000")
         mlflow.set_experiment("code-grader")
-        with mlflow.start_run():
-            # Convert data to DataFrame for logging
+
+        # Generate descriptive run name with timestamp
+        run_name = f"code_grader_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+        with mlflow.start_run(run_name=run_name):
+            # Log dataset
             dataset_df = pd.DataFrame(data, columns=["code", "criteria", "label"])
             mlflow.log_input(
-                mlflow.data.from_pandas(dataset_df, source="grading_data.db"),
+                mlflow.data.from_pandas(
+                    dataset_df,
+                    source="grading_data.db",
+                    name="graded_samples",
+                    targets="label",
+                ),
                 context="training",
             )
 
-            # Log hyperparameters
+            # Log model parameters
             mlflow.log_params(
                 {
                     "model_name": model_name,
                     "num_train_epochs": training_args.num_train_epochs,
                     "batch_size": training_args.per_device_train_batch_size,
                     "fp16": training_args.fp16,
+                    "device": str(device),
+                    "dataset_size": len(dataset),
                 }
             )
 
-            # Train the model
+            # Train model
             train_result = trainer.train()
-            mlflow.log_metric("training_loss", train_result.training_loss)
 
-            # Define model signature
-            sample_input = {
-                "text": ["Grade this code: sample code | Criteria: sample criteria"]
+            # Log training metrics
+            metrics = {
+                "training_loss": train_result.training_loss,
+                "global_step": train_result.global_step,
             }
-            sample_output = {"label": [0]}
-            signature = infer_signature(sample_input, sample_output)
+            mlflow.log_metrics(metrics)
 
-            # Log and register the model
+            # Log and register model
             mlflow.transformers.log_model(
                 transformers_model={"model": model, "tokenizer": tokenizer},
                 artifact_path="code_grader_model",
                 registered_model_name="CodeGraderModel",
-                signature=signature,
-                metadata={"task": "code_grading", "dataset_size": len(data)},
             )
+
             logger.info(
                 "Model retrained, logged, and registered to MLflow Model Registry"
             )
+
+            # Signal completion
             with open("/tmp/new_model_ready", "w") as f:
                 f.write("ready")
+
     except Exception as e:
         logger.error(f"Retraining failed: {e}")
         raise

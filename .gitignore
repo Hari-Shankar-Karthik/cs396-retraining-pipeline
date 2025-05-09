@@ -7,3 +7,4 @@ grader_service/results
 models
 grader_service/tmp*
 mlruns
+mlartifacts
