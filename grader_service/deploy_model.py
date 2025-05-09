@@ -7,6 +7,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def deploy_model():
     try:
         client = mlflow.tracking.MlflowClient()
@@ -22,15 +23,17 @@ def deploy_model():
         model_uri = f"models:/{registered_model_name}/Production"
         new_model = mlflow.transformers.load_model(model_uri)
 
-        from model_api.views import model
+        from model_api.views import model, current_model_version
 
         model.model = new_model["model"]
         model.tokenizer = new_model["tokenizer"]
+        current_model_version = latest_versions[0].version  # Update model version
 
-        logger.info("Successfully deployed new model to production")
+        logger.info(f"Successfully deployed new model version {current_model_version}")
     except Exception as e:
         logger.error(f"Model deployment failed: {e}")
         raise
+
 
 if __name__ == "__main__":
     deploy_model()
