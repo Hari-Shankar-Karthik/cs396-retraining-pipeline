@@ -1,8 +1,12 @@
 from django.http import JsonResponse
 from .inference.model import load_model, grade_submission
 import subprocess
+import threading
+import logging
 
 model = load_model()
+logger = logging.getLogger(__name__)
+
 
 def grade_code(request):
     code = request.GET.get("code", "print('Hello')")
@@ -12,21 +16,25 @@ def grade_code(request):
 
 
 def trigger_retrain(request):
+
+    def run_retrain():
+        try:
+            result = subprocess.run(
+                ["python", "/raid/ganesh/saurav/hari/grader_service/retrain.py"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"Retraining completed: {result.stdout}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Retraining failed: {e.stderr}")
+
     try:
-        result = subprocess.run(
-            ["python", "/raid/ganesh/saurav/hari/grader_service/retrain.py"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        # Run retraining in a background thread
+        thread = threading.Thread(target=run_retrain)
+        thread.start()
         return JsonResponse(
-            {
-                "status": "success",
-                "message": "Retraining started",
-                "output": result.stdout,
-            }
+            {"status": "success", "message": "Retraining started in background"}
         )
-    except subprocess.CalledProcessError as e:
-        return JsonResponse(
-            {"status": "error", "message": str(e), "error": e.stderr}, status=500
-        )
+    except Exception as e:
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)

@@ -1,1 +1,9 @@
 grader_service/mlruns
+.vscode
+*.pyc
+*.db
+*.sqlite3
+grader_service/results
+models
+grader_service/tmp*
+mlruns

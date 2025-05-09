@@ -7,7 +7,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 def deploy_model():
     try:
         client = mlflow.tracking.MlflowClient()
@@ -32,7 +31,6 @@ def deploy_model():
     except Exception as e:
         logger.error(f"Model deployment failed: {e}")
         raise
-
 
 if __name__ == "__main__":
     deploy_model()
