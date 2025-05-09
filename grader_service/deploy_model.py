@@ -27,6 +27,7 @@ def deploy_model():
 
         model.model = new_model["model"]
         model.tokenizer = new_model["tokenizer"]
+        global current_model_version
         current_model_version = latest_versions[0].version  # Update model version
 
         logger.info(f"Successfully deployed new model version {current_model_version}")

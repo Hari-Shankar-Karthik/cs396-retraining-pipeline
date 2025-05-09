@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import mlflow
+from mlflow.tracking import MlflowClient
 import mlflow.transformers
 from transformers import (
     AutoTokenizer,
@@ -14,6 +15,8 @@ import torch
 import pandas as pd
 from datetime import datetime
 import uuid
+import sys
+
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +24,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+def ensure_retrain_status_schema():
+    """Ensure the retrain_status table has the correct schema."""
+    conn = sqlite3.connect("grading_data.db")
+    cursor = conn.cursor()
+    logger.info(f"Connecting to database at: {os.path.abspath('grading_data.db')}")
+
+    # Create table if it doesn't exist
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS retrain_status
+           (run_id TEXT PRIMARY KEY, status TEXT, error TEXT, start_time TEXT, model_version TEXT)"""
+    )
+
+    # Check if model_version column exists
+    cursor.execute("PRAGMA table_info(retrain_status)")
+    columns = [info[1] for info in cursor.fetchall()]
+    if "model_version" not in columns:
+        logger.info("Adding model_version column to retrain_status table")
+        cursor.execute("ALTER TABLE retrain_status ADD COLUMN model_version TEXT")
+
+    conn.commit()
+    conn.close()
+
+
+def update_retrain_status(run_id, status, model_version=None, error=None):
+    """Update retraining status and model version in database."""
+    ensure_retrain_status_schema()
+    conn = sqlite3.connect("grading_data.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE retrain_status SET status = ?, error = ?, model_version = ? WHERE run_id = ?",
+        (status, error, model_version, run_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def load_data():
@@ -49,14 +88,31 @@ def preprocess(rows):
     return inputs, labels
 
 
-def retrain_model():
+def transition_to_production(model_version):
+    client = MlflowClient()
+    try:
+        # Transition the model version to the Production stage
+        client.transition_model_version_stage(
+            name="CodeGraderModel", version=model_version, stage="Production"
+        )
+        print(f"Model version {model_version} transitioned to Production.")
+    except Exception as e:
+        print(f"Failed to transition model to production: {e}")
+
+
+def retrain_model(run_id=None):
     """Retrain the code grading model and log to MLflow."""
     logger.info("Starting model retraining")
+
+    # Ensure database schema is correct
+    ensure_retrain_status_schema()
 
     # Load and validate data
     data = load_data()
     if len(data) < 10:
         logger.warning("Insufficient data for retraining. Need at least 10 samples.")
+        if run_id:
+            update_retrain_status(run_id, "failed", error="Insufficient training data")
         return
 
     # Preprocess data
@@ -115,15 +171,18 @@ def retrain_model():
         with mlflow.start_run(run_name=run_name):
             # Log dataset
             dataset_df = pd.DataFrame(data, columns=["code", "criteria", "label"])
-            mlflow.log_input(
-                mlflow.data.from_pandas(
-                    dataset_df,
-                    source="grading_data.db",
-                    name="graded_samples",
-                    targets="label",
-                ),
-                context="training",
-            )
+            try:
+                mlflow.log_input(
+                    mlflow.data.from_pandas(
+                        dataset_df,
+                        source="grading_data.db",
+                        name="graded_samples",
+                        targets="label",
+                    ),
+                    context="training",
+                )
+            except Exception as e:
+                logger.warning(f"mlflow.log_input failed: {e}")
 
             # Log model parameters
             mlflow.log_params(
@@ -148,24 +207,43 @@ def retrain_model():
             mlflow.log_metrics(metrics)
 
             # Log and register model
-            mlflow.transformers.log_model(
+            model_info = mlflow.transformers.log_model(
                 transformers_model={"model": model, "tokenizer": tokenizer},
                 artifact_path="code_grader_model",
                 registered_model_name="CodeGraderModel",
+                task="text-classification",
+            )
+
+            # Get model version
+            client = mlflow.tracking.MlflowClient()
+            latest_version = client.get_latest_versions("CodeGraderModel")[-1].version
+
+            # Transition model to Production
+            client.transition_model_version_stage(
+                name="CodeGraderModel", version=latest_version, stage="Production"
             )
 
             logger.info(
-                "Model retrained, logged, and registered to MLflow Model Registry"
+                "Model retrained, logged, registered, and transitioned to Production"
             )
 
-            # Signal completion
-            with open("/tmp/new_model_ready", "w") as f:
-                f.write("ready")
+            # Update retrain status with model version
+            if run_id:
+                update_retrain_status(run_id, "completed", model_version=latest_version)
+
+            model_version = mlflow.register_model("model", "CodeGraderModel").version
+            transition_to_production(model_version)
+            update_retrain_status(run_id, "completed", model_version=model_version)
+
+        transition_to_production(model_version)
 
     except Exception as e:
         logger.error(f"Retraining failed: {e}")
+        if run_id:
+            update_retrain_status(run_id, "failed", error=str(e))
         raise
 
 
 if __name__ == "__main__":
-    retrain_model()
+    run_id = sys.argv[1] if len(sys.argv) > 1 else None
+    retrain_model(run_id)
