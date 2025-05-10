@@ -6,6 +6,10 @@ import logging
 import sqlite3
 from datetime import datetime
 import uuid
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 
 model = load_model()
 logger = logging.getLogger(__name__)

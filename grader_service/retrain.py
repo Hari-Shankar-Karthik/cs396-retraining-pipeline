@@ -14,6 +14,10 @@ import torch
 import pandas as pd
 from datetime import datetime
 import uuid
+import transformers
+
+transformers.logging.set_verbosity_error()
+
 
 # Configure logging
 logging.basicConfig(
@@ -143,7 +147,6 @@ def retrain_model():
             # Log training metrics
             metrics = {
                 "training_loss": train_result.training_loss,
-                "global_step": train_result.global_step,
             }
             mlflow.log_metrics(metrics)
 
